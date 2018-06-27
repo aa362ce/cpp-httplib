@@ -15,6 +15,7 @@ test/*.pem
 
 Debug
 Release
+autom4te.cache
 *.vcxproj.user
 *.sdf
 *.suo
