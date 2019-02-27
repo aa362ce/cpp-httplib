@@ -2,7 +2,6 @@
 #include <gtest/gtest.h>
 #include <httplib.h>
 #include <future>
-#include <iostream>
 
 #define SERVER_CERT_FILE "./cert.pem"
 #define SERVER_PRIVATE_KEY_FILE "./key.pem"
@@ -19,6 +18,11 @@ using namespace httplib;
 
 const char* HOST = "localhost";
 const int   PORT = 1234;
+
+const string LONG_QUERY_VALUE = string(25000, '@');
+const string LONG_QUERY_URL = "/long-query-value?key=" + LONG_QUERY_VALUE;
+
+const std::string JSON_DATA = "{\"hello\":\"world\"}";
 
 #ifdef _WIN32
 TEST(StartupTest, WSAStartup)
@@ -66,7 +70,7 @@ TEST(ParseQueryTest, ParseQueryString)
 TEST(GetHeaderValueTest, DefaultValue)
 {
     Headers headers = {{"Dummy","Dummy"}};
-    auto val = detail::get_header_value(headers, "Content-Type", "text/plain");
+    auto val = detail::get_header_value(headers, "Content-Type", 0, "text/plain");
     EXPECT_STREQ("text/plain", val);
 }
 
@@ -80,7 +84,7 @@ TEST(GetHeaderValueTest, DefaultValueInt)
 TEST(GetHeaderValueTest, RegularValue)
 {
     Headers headers = {{"Content-Type", "text/html"}, {"Dummy", "Dummy"}};
-    auto val = detail::get_header_value(headers, "Content-Type", "text/plain");
+    auto val = detail::get_header_value(headers, "Content-Type", 0, "text/plain");
     EXPECT_STREQ("text/html", val);
 }
 
@@ -95,25 +99,25 @@ TEST(GetHeaderValueTest, Range)
 {
     {
         Headers headers = { make_range_header(1) };
-        auto val = detail::get_header_value(headers, "Range", 0);
+        auto val = detail::get_header_value(headers, "Range", 0, 0);
         EXPECT_STREQ("bytes=1-", val);
     }
 
     {
         Headers headers = { make_range_header(1, 10) };
-        auto val = detail::get_header_value(headers, "Range", 0);
+        auto val = detail::get_header_value(headers, "Range", 0, 0);
         EXPECT_STREQ("bytes=1-10", val);
     }
 
     {
         Headers headers = { make_range_header(1, 10, 100) };
-        auto val = detail::get_header_value(headers, "Range", 0);
+        auto val = detail::get_header_value(headers, "Range", 0, 0);
         EXPECT_STREQ("bytes=1-10, 100-", val);
     }
 
     {
         Headers headers = { make_range_header(1, 10, 100, 200) };
-        auto val = detail::get_header_value(headers, "Range", 0);
+        auto val = detail::get_header_value(headers, "Range", 0, 0);
         EXPECT_STREQ("bytes=1-10, 100-200", val);
     }
 }
@@ -230,6 +234,95 @@ TEST(ConnectionErrorTest, Timeout)
     ASSERT_TRUE(res == nullptr);
 }
 
+TEST(CancelTest, NoCancel) {
+    auto host = "httpbin.org";
+    auto sec = 5;
+
+#ifdef CPPHTTPLIB_OPENSSL_SUPPORT
+    auto port = 443;
+    httplib::SSLClient cli(host, port, sec);
+#else
+    auto port = 80;
+    httplib::Client cli(host, port, sec);
+#endif
+
+    httplib::Headers headers;
+    auto res = cli.Get("/range/32", headers, [](uint64_t, uint64_t) {
+        return true;
+    });
+    ASSERT_TRUE(res != nullptr);
+    EXPECT_EQ(res->body, "abcdefghijklmnopqrstuvwxyzabcdef");
+    EXPECT_EQ(200, res->status);
+}
+
+TEST(CancelTest, WithCancelSmallPayload) {
+    auto host = "httpbin.org";
+    auto sec = 5;
+
+#ifdef CPPHTTPLIB_OPENSSL_SUPPORT
+    auto port = 443;
+    httplib::SSLClient cli(host, port, sec);
+#else
+    auto port = 80;
+    httplib::Client cli(host, port, sec);
+#endif
+
+    httplib::Headers headers;
+    auto res = cli.Get("/range/32", headers, [](uint64_t, uint64_t) {
+        return false;
+    });
+    ASSERT_TRUE(res == nullptr);
+}
+
+TEST(CancelTest, WithCancelLargePayload) {
+    auto host = "httpbin.org";
+    auto sec = 5;
+
+#ifdef CPPHTTPLIB_OPENSSL_SUPPORT
+    auto port = 443;
+    httplib::SSLClient cli(host, port, sec);
+#else
+    auto port = 80;
+    httplib::Client cli(host, port, sec);
+#endif
+
+    uint32_t count = 0;
+    httplib::Headers headers;
+    auto res = cli.Get("/range/65536", headers, [&count](uint64_t, uint64_t) {
+        return (count++ == 0);
+    });
+    ASSERT_TRUE(res == nullptr);
+}
+
+TEST(BaseAuthTest, FromHTTPWatch)
+{
+    auto host = "httpbin.org";
+
+#ifdef CPPHTTPLIB_OPENSSL_SUPPORT
+    auto port = 443;
+    httplib::SSLClient cli(host, port);
+#else
+    auto port = 80;
+    httplib::Client cli(host, port);
+#endif
+
+    {
+        auto res = cli.Get("/basic-auth/hello/world");
+        ASSERT_TRUE(res != nullptr);
+        EXPECT_EQ(401, res->status);
+    }
+
+    {
+        httplib::Headers headers = {
+            { "Authorization", "Basic aGVsbG86d29ybGQ=" }
+        };
+        auto res = cli.Get("/basic-auth/hello/world", headers);
+        ASSERT_TRUE(res != nullptr);
+        EXPECT_EQ(res->body, "{\n  \"authenticated\": true, \n  \"user\": \"hello\"\n}\n");
+        EXPECT_EQ(200, res->status);
+    }
+}
+
 TEST(Server, BindAndListenSeparately) {
     Server svr;
     int port = svr.bind_to_any_port("localhost");
@@ -282,6 +375,31 @@ protected:
                     res.status = 404;
                 }
             })
+            .Post("/x-www-form-urlencoded-json", [&](const Request& req, Response& res) {
+                auto json = req.get_param_value("json");
+                ASSERT_EQ(JSON_DATA, json);
+                res.set_content(json, "appliation/json");
+                res.status = 200;
+            })
+            .Get("/streamedchunked", [&](const Request& /*req*/, Response& res) {
+                res.streamcb = [] (uint64_t offset) {
+                    if (offset < 3)
+                        return "a";
+                    if (offset < 6)
+                        return "b";
+                    return "";
+                };
+            })
+            .Get("/streamed", [&](const Request& /*req*/, Response& res) {
+                res.set_header("Content-Length", "6");
+                res.streamcb = [] (uint64_t offset) {
+                    if (offset < 3)
+                        return "a";
+                    if (offset < 6)
+                        return "b";
+                    return "";
+                };
+            })
             .Post("/chunked", [&](const Request& req, Response& /*res*/) {
                 EXPECT_EQ(req.body, "dechunked post body");
             })
@@ -319,6 +437,10 @@ protected:
                     EXPECT_EQ(0u, file.length);
                 }
             })
+            .Post("/empty", [&](const Request& req, Response& res) {
+                EXPECT_EQ(req.body, "");
+                res.set_content("empty", "text/plain");
+            })
             .Put("/put", [&](const Request& req, Response& res) {
                 EXPECT_EQ(req.body, "PUT");
                 res.set_content(req.body, "text/plain");
@@ -333,6 +455,16 @@ protected:
                 EXPECT_EQ("/request-target?aaa=bbb&ccc=ddd", req.target);
                 EXPECT_EQ("bbb", req.get_param_value("aaa"));
                 EXPECT_EQ("ddd", req.get_param_value("ccc"));
+            })
+            .Get("/long-query-value", [&](const Request& req, Response& /*res*/) {
+                EXPECT_EQ(LONG_QUERY_URL, req.target);
+                EXPECT_EQ(LONG_QUERY_VALUE, req.get_param_value("key"));
+            })
+            .Get("/array-param", [&](const Request& req, Response& /*res*/) {
+                EXPECT_EQ(3u, req.get_param_value_count("array"));
+                EXPECT_EQ("value1", req.get_param_value("array", 0));
+                EXPECT_EQ("value2", req.get_param_value("array", 1));
+                EXPECT_EQ("value3", req.get_param_value("array", 2));
             })
 #ifdef CPPHTTPLIB_ZLIB_SUPPORT
             .Get("/gzip", [&](const Request& /*req*/, Response& res) {
@@ -363,7 +495,7 @@ protected:
         persons_["john"] = "programmer";
 
         t_ = thread([&](){
-            svr_.listen(HOST, PORT);
+            ASSERT_TRUE(svr_.listen(HOST, PORT));
         });
 
         while (!svr_.is_running()) {
@@ -398,6 +530,7 @@ TEST_F(ServerTest, GetMethod200)
     EXPECT_EQ("HTTP/1.1", res->version);
     EXPECT_EQ(200, res->status);
     EXPECT_EQ("text/plain", res->get_header_value("Content-Type"));
+    EXPECT_EQ(1, res->get_header_value_count("Content-Type"));
     EXPECT_EQ("close", res->get_header_value("Connection"));
     EXPECT_EQ("Hello World!", res->body);
 }
@@ -479,6 +612,26 @@ TEST_F(ServerTest, PostMethod2)
     ASSERT_EQ(200, res->status);
     ASSERT_EQ("text/plain", res->get_header_value("Content-Type"));
     ASSERT_EQ("coder", res->body);
+}
+
+TEST_F(ServerTest, PostWwwFormUrlEncodedJson)
+{
+    Params params;
+    params.emplace("json", JSON_DATA);
+
+    auto res = cli_.Post("/x-www-form-urlencoded-json", params);
+
+    ASSERT_TRUE(res != nullptr);
+    ASSERT_EQ(200, res->status);
+    ASSERT_EQ(JSON_DATA, res->body);
+}
+
+TEST_F(ServerTest, PostEmptyContent)
+{
+    auto res = cli_.Post("/empty", "", "text/plain");
+    ASSERT_TRUE(res != nullptr);
+    ASSERT_EQ(200, res->status);
+    ASSERT_EQ("empty", res->body);
 }
 
 TEST_F(ServerTest, GetMethodDir)
@@ -588,6 +741,14 @@ TEST_F(ServerTest, LongHeader)
     auto ret = cli_.send(req, *res);
 
 	ASSERT_TRUE(ret);
+	EXPECT_EQ(200, res->status);
+}
+
+TEST_F(ServerTest, LongQueryValue)
+{
+	auto res = cli_.Get(LONG_QUERY_URL.c_str());
+
+	ASSERT_TRUE(res != nullptr);
 	EXPECT_EQ(200, res->status);
 }
 
@@ -712,6 +873,23 @@ TEST_F(ServerTest, CaseInsensitiveTransferEncoding)
 	EXPECT_EQ(200, res->status);
 }
 
+TEST_F(ServerTest, GetStreamed)
+{
+    auto res = cli_.Get("/streamed");
+    ASSERT_TRUE(res != nullptr);
+    EXPECT_EQ(200, res->status);
+    EXPECT_EQ("6", res->get_header_value("Content-Length"));
+    EXPECT_TRUE(res->body == "aaabbb");
+}
+
+TEST_F(ServerTest, GetStreamedChunked)
+{
+    auto res = cli_.Get("/streamedchunked");
+    ASSERT_TRUE(res != nullptr);
+    EXPECT_EQ(200, res->status);
+    EXPECT_TRUE(res->body == "aaabbb");
+}
+
 TEST_F(ServerTest, LargeChunkedPost) {
     Request req;
     req.method = "POST";
@@ -788,6 +966,13 @@ TEST_F(ServerTest, Options)
 TEST_F(ServerTest, URL)
 {
     auto res = cli_.Get("/request-target?aaa=bbb&ccc=ddd");
+    ASSERT_TRUE(res != nullptr);
+    EXPECT_EQ(200, res->status);
+}
+
+TEST_F(ServerTest, ArrayParam)
+{
+    auto res = cli_.Get("/array-param?array=value1&array=value2&array=value3");
     ASSERT_TRUE(res != nullptr);
     EXPECT_EQ(200, res->status);
 }
@@ -890,7 +1075,7 @@ protected:
         });
 
         t_ = thread([&]() {
-            svr_.listen(nullptr, PORT, AI_PASSIVE);
+            ASSERT_TRUE(svr_.listen(nullptr, PORT, AI_PASSIVE));
         });
 
         while (!svr_.is_running()) {
@@ -932,7 +1117,7 @@ protected:
         t_ = thread([&](){
             svr_.bind_to_any_port(HOST);
             msleep(500);
-            svr_.listen_after_bind();
+            ASSERT_TRUE(svr_.listen_after_bind());
         });
 
         while (!svr_.is_running()) {

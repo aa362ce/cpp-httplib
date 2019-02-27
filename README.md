@@ -1,6 +1,9 @@
 cpp-httplib
 ===========
 
+[![Build Status](https://travis-ci.org/yhirose/cpp-httplib.svg?branch=master)](https://travis-ci.org/yhirose/cpp-httplib)
+[![Bulid Status](https://ci.appveyor.com/api/projects/status/github/yhirose/cpp-httplib?branch=master&svg=true)](https://ci.appveyor.com/project/yhirose/cpp-httplib)
+
 A C++11 header-only HTTP library.
 
 It's extremely easy to setup. Just include **httplib.h** file in your code!
@@ -33,6 +36,13 @@ int main(void)
 ```
 
 `Post`, `Put`, `Delete` and `Options` methods are also supported.
+
+### Bind a socket to multiple interfaces and any available port
+
+```cpp
+int port = svr.bind_to_any_port("0.0.0.0");
+svr.listen_after_bind();
+```
 
 ### Method Chain
 
@@ -166,6 +176,7 @@ std::shared_ptr<httplib::Response> res =
         printf("%lld / %lld bytes => %d%% complete\n",
             len, total,
             (int)((len/total)*100));
+        return true; // return 'false' if you want to cancel the request.
     }
 );
 ```
@@ -214,7 +225,12 @@ The server applies gzip compression to the following MIME type contents:
   * application/xml
   * application/xhtml+xml
 
+NOTE
+----
+
+g++ 4.8 cannot build this library since `<regex>` in g++4.8 is [broken](https://stackoverflow.com/questions/12530406/is-gcc-4-8-or-earlier-buggy-about-regular-expressions).
+
 License
 -------
 
-MIT license (© 2018 Yuji Hirose)
+MIT license (© 2019 Yuji Hirose)

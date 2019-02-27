@@ -67,7 +67,7 @@ string log(const Request& req, const Response& res)
 
     s += "================================\n";
 
-    snprintf(buf, sizeof(buf), "%s %s %s", req.method.c_str(), req.path.c_str(), req.version.c_str());
+    snprintf(buf, sizeof(buf), "%s %s %s", req.method.c_str(), req.version.c_str(), req.path.c_str());
     s += buf;
 
     string query;
@@ -105,7 +105,7 @@ int main(int argc, const char** argv)
     Server svr;
 #endif
 
-    svr.Post("/multipart", [](const auto& req, auto& res) {
+    svr.Post("/multipart", [](const Request& req, Response& res) {
         auto body =
             dump_headers(req.headers) +
             dump_multipart_files(req.files);
@@ -113,14 +113,14 @@ int main(int argc, const char** argv)
         res.set_content(body, "text/plain");
     });
 
-    svr.set_error_handler([](const auto& /*req*/, auto& res) {
+    svr.set_error_handler([](const Request& /*req*/, Response& res) {
         const char* fmt = "<p>Error Status: <span style='color:red;'>%d</span></p>";
         char buf[BUFSIZ];
         snprintf(buf, sizeof(buf), fmt, res.status);
         res.set_content(buf, "text/html");
     });
 
-    svr.set_logger([](const auto& req, const auto& res) {
+    svr.set_logger([](const Request& req, const Response& res) {
         cout << log(req, res);
     });
 
